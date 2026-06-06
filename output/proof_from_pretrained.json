@@ -1,0 +1,10 @@
+{
+  "dense_val_ppl": 365.671582767417,
+  "dsa_before_warmup_ppl": 404.0520846647337,
+  "after_warmup_ppl": 369.3789617893753,
+  "warmup_kl": 0.08279452584683895,
+  "after_sparse_ppl": 322.10621870876787,
+  "sparse_kl": 0.05371617376804352,
+  "dense_continuation_ppl": 322.10308288299706,
+  "delta_vs_compute_matched_dense_pct": 0.0009735472702542064
+}

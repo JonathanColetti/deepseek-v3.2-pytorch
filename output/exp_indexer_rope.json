@@ -1,0 +1,25 @@
+{
+  "config": {
+    "seq_len": 512,
+    "original_window": 128,
+    "top_k": 32,
+    "pretrain_steps": 600,
+    "warmup_steps": 400
+  },
+  "results": {
+    "yarn": {
+      "warmup_kl": 0.04394827038049698,
+      "recall_in_window": 0.8778483072916666,
+      "recall_extended": 0.7889166937934028
+    },
+    "plain": {
+      "warmup_kl": 0.05086349695920944,
+      "recall_in_window": 0.8609822591145834,
+      "recall_extended": 0.7504052056206597
+    }
+  },
+  "gap_yarn_minus_plain": {
+    "in_window": 0.01686604817708326,
+    "extended": 0.03851148817274308
+  }
+}

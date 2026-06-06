@@ -1,0 +1,26 @@
+# Python junk
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# notebook checkpoints
+.ipynb_checkpoints/
+
+# test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# generated training artifacts 
+*.pt
+output/**/checkpoint*/
+checkpoints/
+wandb/
+
+# local env
+.venv/
+.venv-backups/
+.hf_home/

@@ -1,0 +1,91 @@
+{
+  "config": "configs/deepseek_v3_2_nano.json",
+  "checkpoint": "output/wikitext_comparison/dense/checkpoint-final/checkpoint.pt",
+  "top_k": 128,
+  "a1_recall": {
+    "k": 128,
+    "pre_warmup": {
+      "learned": {
+        "recall": 0.4609826405843099,
+        "mass": 0.4632801247967614
+      },
+      "random": {
+        "recall": 0.46138932969835067,
+        "mass": 0.46154557002915275
+      },
+      "stride": {
+        "recall": 0.444252438015408,
+        "mass": 0.40972547398673165
+      }
+    },
+    "post_warmup": {
+      "learned": {
+        "recall": 0.7698020935058594,
+        "mass": 0.6759601599640317
+      },
+      "random": {
+        "recall": 0.46138932969835067,
+        "mass": 0.46154557002915275
+      },
+      "stride": {
+        "recall": 0.444252438015408,
+        "mass": 0.40972547398673165
+      }
+    },
+    "warmup_kl": 0.05501698702573776
+  },
+  "a2_learned_vs_naive": {
+    "Dense": 323.84980484272666,
+    "DSA-Learned": 322.0729907472653,
+    "DSA-Random": 346.07577741136726,
+    "DSA-Stride": 363.00965126738464
+  },
+  "a3_topk_sweep": {
+    "32": 407.6773678337505,
+    "64": 382.0328123790035,
+    "128": 370.12369993594564,
+    "256": 366.18634128413555,
+    "dense": 365.671582767417
+  },
+  "a4_flops": {
+    "top_k": 128,
+    "rows": [
+      {
+        "seq_len": 128,
+        "dense_gflop": 0.025,
+        "dsa_gflop": 0.025,
+        "ratio": 1.0
+      },
+      {
+        "seq_len": 512,
+        "dense_gflop": 0.403,
+        "dsa_gflop": 0.101,
+        "ratio": 4.0
+      },
+      {
+        "seq_len": 2048,
+        "dense_gflop": 6.442,
+        "dsa_gflop": 0.403,
+        "ratio": 16.0
+      },
+      {
+        "seq_len": 8192,
+        "dense_gflop": 103.079,
+        "dsa_gflop": 1.611,
+        "ratio": 64.0
+      },
+      {
+        "seq_len": 32768,
+        "dense_gflop": 1649.267,
+        "dsa_gflop": 6.442,
+        "ratio": 256.0
+      },
+      {
+        "seq_len": 131072,
+        "dense_gflop": 26388.279,
+        "dsa_gflop": 25.77,
+        "ratio": 1024.0
+      }
+    ]
+  }
+}

@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deepseek-v3-2"
+version = "0.1.0"
+description = "DeepSeek V3.2 with DSA (DeepSeek Sparse Attention) small PyTorch implementation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Jonathan Coletti"}]
+keywords = ["deep-learning", "transformers", "sparse-attention", "mixture-of-experts"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.1.0",
+    "transformers>=4.40.0",
+    "einops>=0.7.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+train = [
+    "accelerate>=0.28.0",
+    "datasets>=2.18.0",
+    "wandb>=0.16.0",
+]
+benchmark = [
+    "matplotlib>=3.7.0",
+    "pandas>=2.0.0",
+    "tabulate>=0.9.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.4.0",
+]
+all = ["deepseek-v3-2[train,benchmark,dev]"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow",
+    "multi_gpu: requires 2 GPUs",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deepseek_v3_2"]
