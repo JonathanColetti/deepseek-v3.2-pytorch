@@ -21,11 +21,11 @@ $I_{t,s} = \sum_{j=1}^{H_I}  w^I_{t,j} . ReLU(q^I_{t,j} . k^I_s)$
 
 | Symbol | Description | Paper (671B) default |
 |--------|-------------|---------------|
-| H_I | Indexer heads | 64 |
-| D_I | Indexer dimension | 128 |
+| $H_I$ | Indexer heads | 64 |
+| $D_I$ | Indexer dimension | 128 |
 | k | Top-k tokens selected | 2 048 |
-| q^I, k^I | Projected from hidden states h_t / h_s, RoPE-applied | |
-| w^I_{t,j} | Per-head weight: raw linear . H_I^{-1/2} (no softmax) | |
+| $q^I, k^I$ | Projected from hidden states h_t / h_s, RoPE-applied | |
+| $w^I_{t,j}$ | Per-head weight: raw linear * $H_I^{-1/2}$ (no softmax) | |
 
 > The small/nano configs in this repo deliberately shrink H_I and D_I for single-GPU
 > training; the scoring head matches transformers' `DeepseekV4IndexerScorer`
