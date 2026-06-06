@@ -43,7 +43,7 @@ $I_{t,s} = \sum_{j=1}^{H_I}  w^I_{t,j} . ReLU(q^I_{t,j} . k^I_s)$
 
 | Stage | Steps (paper) | What's trained | Loss objective | Attention mode |
 |-------|-------|---------------|----------------|----------------|
-| 1: Dense warm-up | 1 000 | Indexer only (rest frozen) | KL(p_attn || q_indexer) | Dense (full) |
+| 1: Dense warm-up | 1 000 | Indexer only (rest frozen) | $KL(p_attn || q_indexer)$ | Dense (full) |
 | 2: Sparse training | 15 000 | All parameters | LM + lambda.KL | Sparse (top-k) |
 
 Stage 1 aligns the Lightning Indexer to the main attention distribution before
