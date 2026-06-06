@@ -17,7 +17,7 @@ NOTE: Obviously I could not finetune or work with large models thus small experi
 ### Indexer equation (paper Eq. 1)
 
 
-$I_{t,s} = sum_{j=1}^{H_I}  w^I_{t,j} . ReLU(q^I_{t,j} . k^I_s)$
+$I_{t,s} = \sum_{j=1}^{H_I}  w^I_{t,j} . ReLU(q^I_{t,j} . k^I_s)$
 
 | Symbol | Description | Paper (671B) default |
 |--------|-------------|---------------|
