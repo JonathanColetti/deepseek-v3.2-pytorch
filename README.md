@@ -232,7 +232,7 @@ Warm up once, then evaluate at several k (no per-k retraining):
 [OK] Graceful, monotone degradation: quality trades smoothly against sparsity and
 approaches dense as k grows, with no cliff.
 
-### A4: Attention FLOP scaling: O(L^2) -> O(L.k)
+### A4: Attention FLOP scaling: O(L^2) -> O(L * k)
 
 Architecture-exact attention FLOPs (k=128 fixed):
 
