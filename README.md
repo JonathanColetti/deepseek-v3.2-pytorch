@@ -29,11 +29,11 @@ $I_{t,s} = \sum_{j=1}^{H_I}  w^I_{t,j} . ReLU(q^I_{t,j} . k^I_s)$
 
 > The small/nano configs in this repo deliberately shrink H_I and D_I for single-GPU
 > training; the scoring head matches transformers' `DeepseekV4IndexerScorer`
-> (`sum_h w_{t,h}.ReLU(q_{t,h}.k_s).D_I^{-1/2}`) exactly.
+> ($sum_h w_{t,h}.ReLU(q_{t,h}.k_s).D_I^{-1/2}$) exactly.
 
 ### DeepSeek V3 baseline included
 
-- **MLA**: Low-rank KV compression (`c^K = kv_a_proj(h)`), shared across all query heads (MQA mode)
+- **MLA**: Low-rank KV compression ($c^K = kv_a_proj(h)$), shared across all query heads (MQA mode)
 - **Group-limited MoE Router**: Sigmoid gating, per-group top-k selection, FP32 e-score correction bias
 - **Shared expert branch**: Always-active expert added in parallel to routed experts
 - **YaRN RoPE**: Interleaved positional encoding with long-context scaling (the
