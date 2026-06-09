@@ -60,8 +60,8 @@ main model: even though they are summed into one objective. This is enforced in
 ## Installation
 
 ```bash
-git clone <repo>
-cd deepseek_v3_2
+git clone https://github.com/JonathanColetti/deepseek-v3.2-pytorch
+cd 'deepseek-v3.2-pytorch'
 pip install -e ".[dev]"       # run tests
 pip install -e ".[train]"     # + accelerate, datasets, wandb
 pip install -e ".[benchmark]" # + matplotlib, pandas, tabulate
