@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # coding=utf-8
 """
-scripts/exp_indexer_rope.py: does the faithful (YaRN, shared frequency) indexer RoPE
-actually matter? A controlled long-context ablation on REAL data.
+Does the faithful (YaRN, shared frequency) indexer RoPE actually matter?
+A controlled long-context ablation on REAL data.
 
 The Lightning Indexer must imitate what dense attention attends to. The official
 DeepSeek V3.2 indexer reuses the main attention's YaRN scaled frequencies so its sense
@@ -16,8 +16,8 @@ This experiment isolates exactly that one variable:
      YaRN original window.
   2. Deep copy it into two arms that share identical weights and an identical (random,
      untrained) indexer:
-        arm "yarn"  : indexer keeps the YaRN frequencies shared with the attention.
-        arm "plain" : indexer frequencies overwritten with plain rope_theta (the bug).
+         arm "yarn"  : indexer keeps the YaRN frequencies shared with the attention.
+         arm "plain" : indexer frequencies overwritten with plain rope_theta (the bug).
   3. Warm up each arm's indexer with the same data and seed (KL alignment to dense
      attention), everything else frozen.
   4. Measure indexer recall@k against dense attention's own top-k, split by query
@@ -28,32 +28,28 @@ larger gap in the extended region, where the plain frequencies diverge most from
 attention they are trying to match.
 
 Usage:
-    python3 scripts/exp_indexer_rope.py
+    python3 -m deepseek_v3_2.scripts.exp_indexer_rope
+    deepseek-exp-rope
 """
 from __future__ import annotations
 
 import argparse
 import copy
 import json
-import sys
 from pathlib import Path
 from typing import Dict, Tuple
 
 import torch
 
-# hella hacky but eh
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from ablations import (  # noqa: E402  (path set above)
+from .ablations import (
     batches,
     cycle,
     freeze_except_indexer,
     load_wikitext2,
     unfreeze_all,
 )
-from deepseek_v3_2 import DeepSeekV32Config, DeepSeekV32ForCausalLM  # noqa: E402
-from deepseek_v3_2.indexer import compute_rope_inv_freq  # noqa: E402
+from .. import DeepSeekV32Config, DeepSeekV32ForCausalLM
+from ..indexer import compute_rope_inv_freq
 
 
 def build_config(seq_len: int, original_window: int, top_k: int) -> DeepSeekV32Config:
@@ -185,7 +181,7 @@ def recall_by_position(captured, k, boundary, device) -> Tuple[float, float]:
     return in_sum / max(1.0, in_n), ext_sum / max(1.0, ext_n)
 
 
-def main():
+def main(args=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--seq-len", type=int, default=512)
     ap.add_argument("--original-window", type=int, default=128)
@@ -197,24 +193,28 @@ def main():
     ap.add_argument("--warmup-lr", type=float, default=5e-4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="output/exp_indexer_rope.json")
-    args = ap.parse_args()
+
+    if args is None:
+        parsed = ap.parse_args()
+    else:
+        parsed = ap.parse_args(args)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
-    print(f"YaRN window={args.original_window}, seq_len={args.seq_len}, "
-          f"top_k={args.top_k} (boundary between in-window and extended = {args.original_window})")
+    print(f"YaRN window={parsed.original_window}, seq_len={parsed.seq_len}, "
+          f"top_k={parsed.top_k} (boundary between in-window and extended = {parsed.original_window})")
 
-    cfg = build_config(args.seq_len, args.original_window, args.top_k)
-    train_ids = load_wikitext2(args.seq_len, cfg.vocab_size, "train")
-    val_ids = load_wikitext2(args.seq_len, cfg.vocab_size, "validation")
-    val_batch = next(batches(val_ids, args.seq_len, args.batch_size, shuffle=False))
+    cfg = build_config(parsed.seq_len, parsed.original_window, parsed.top_k)
+    train_ids = load_wikitext2(parsed.seq_len, cfg.vocab_size, "train")
+    val_ids = load_wikitext2(parsed.seq_len, cfg.vocab_size, "validation")
+    val_batch = next(batches(val_ids, parsed.seq_len, parsed.batch_size, shuffle=False))
 
     # One shared pretrained model (YaRN attention).
-    torch.manual_seed(args.seed)
-    print(f"\n[1/3] Pretraining shared model ({args.pretrain_steps} steps)...")
+    torch.manual_seed(parsed.seed)
+    print(f"\n[1/3] Pretraining shared model ({parsed.pretrain_steps} steps)...")
     model = DeepSeekV32ForCausalLM(cfg).to(device)
-    pretrain(model, train_ids, args.pretrain_steps, args.seq_len, args.batch_size,
-             args.pretrain_lr, device)
+    pretrain(model, train_ids, parsed.pretrain_steps, parsed.seq_len, parsed.batch_size,
+             parsed.pretrain_lr, device)
 
     # Two arms with identical weights + identical random indexer.
     model_yarn = copy.deepcopy(model)
@@ -235,19 +235,19 @@ def main():
     # Warm up each indexer identically, then measure recall by position.
     results = {}
     for name, m in (("yarn", model_yarn), ("plain", model_plain)):
-        print(f"\n[2/3] Warm-up indexer, arm '{name}' ({args.warmup_steps} steps)...")
-        kl = warmup_indexer(m, train_ids, args.warmup_steps, args.seq_len,
-                            args.batch_size, args.warmup_lr, device, seed=args.seed + 1)
+        print(f"\n[2/3] Warm-up indexer, arm '{name}' ({parsed.warmup_steps} steps)...")
+        kl = warmup_indexer(m, train_ids, parsed.warmup_steps, parsed.seq_len,
+                            parsed.batch_size, parsed.warmup_lr, device, seed=parsed.seed + 1)
         rin, rext = recall_by_position(_capture(m, val_batch, device),
-                                       args.top_k, args.original_window, device)
+                                       parsed.top_k, parsed.original_window, device)
         results[name] = {"warmup_kl": kl, "recall_in_window": rin, "recall_extended": rext}
         print(f"    arm '{name}': KL={kl:.4f}  "
               f"recall(in-window)={rin:.3f}  recall(extended)={rext:.3f}")
 
     print(f"\n[3/3] {'='*60}")
-    print("  Indexer recall@{} vs dense attention top-k (higher is better)".format(args.top_k))
+    print("  Indexer recall@{} vs dense attention top-k (higher is better)".format(parsed.top_k))
     print(f"  {'='*60}")
-    print(f"  {'arm':<8}{'in-window (<%d)' % args.original_window:>18}{'extended (>=%d)' % args.original_window:>18}")
+    print(f"  {'arm':<8}{'in-window (<%d)' % parsed.original_window:>18}{'extended (>=%d)' % parsed.original_window:>18}")
     for name in ("yarn", "plain"):
         r = results[name]
         print(f"  {name:<8}{r['recall_in_window']:>18.3f}{r['recall_extended']:>18.3f}")
@@ -264,13 +264,13 @@ def main():
     print(f"\n  {verdict}")
     print(f"  {'='*60}")
 
-    out = Path(args.out)
+    out = Path(parsed.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "config": {
-            "seq_len": args.seq_len, "original_window": args.original_window,
-            "top_k": args.top_k, "pretrain_steps": args.pretrain_steps,
-            "warmup_steps": args.warmup_steps,
+            "seq_len": parsed.seq_len, "original_window": parsed.original_window,
+            "top_k": parsed.top_k, "pretrain_steps": parsed.pretrain_steps,
+            "warmup_steps": parsed.warmup_steps,
         },
         "results": results,
         "gap_yarn_minus_plain": {"in_window": g_in, "extended": g_ext},

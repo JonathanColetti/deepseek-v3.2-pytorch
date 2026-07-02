@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # coding=utf-8
 """
-scripts/ablations.py: paper-faithful DSA ablations at small scale, on REAL data.
+Paper-faithful DSA ablations at small scale, on REAL data.
 
 Every experiment uses WikiText-2 (never random tokens) and the corrected Lightning
 Indexer, started from a pre-trained dense checkpoint so perplexities live in a real
@@ -17,34 +17,31 @@ regime instead of the ~vocab-size noise floor.
   A4  Attention FLOP scaling      : O(L^2) -> O(L.k).
 
 Usage:
-    python3 scripts/ablations.py                      # all, from the dense checkpoint
-    python3 scripts/ablations.py --only a1            # just the recall proof
-    python3 scripts/ablations.py --checkpoint <path>  # custom dense checkpoint
+    python3 -m deepseek_v3_2.scripts.ablations
+    deepseek-ablations
 """
 from __future__ import annotations
 
 import argparse
 import json
 import math
-import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List
 
 import torch
 import torch.nn as nn
 
-# again hacky but eh not planning to scale and its because of the src problem in pyproject
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from datasets import load_dataset
+from transformers import AutoTokenizer
 
-from deepseek_v3_2 import DeepSeekV32Config, DeepSeekV32ForCausalLM
+from .. import DeepSeekV32Config, DeepSeekV32ForCausalLM
 
 
 def load_wikitext2(seq_len: int, vocab_size: int, split: str) -> torch.Tensor:
     cache = Path(f"/tmp/wikitext2_{split}_{seq_len}.pt")
     if cache.exists():
         return torch.load(cache, weights_only=True)
-    from datasets import load_dataset
-    from transformers import AutoTokenizer
     raw = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
     tok = AutoTokenizer.from_pretrained("gpt2")
     tok.model_max_length = 1_000_000
@@ -232,9 +229,6 @@ def experiment_a1_recall(args, cfg, train_ids, val_ids, device) -> Dict:
     return {"k": k, "pre_warmup": before, "post_warmup": after, "warmup_kl": kl}
 
 
-from contextlib import contextmanager
-
-
 @contextmanager
 def _patched_selector(model, kind, device, seed=0):
     """Override the indexer's scoring with a naive selector (random / stride)."""
@@ -368,34 +362,7 @@ def experiment_a4_flops(args, cfg) -> Dict:
     print(f"  -> reduction grows linearly with L once L > k; {args.top_k}/131072 ~ {131072//args.top_k}x at 128K context.")
     return {"top_k": args.top_k, "rows": rows}
 
-def main(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
-    cfg = load_cfg(args.config, dsa_top_k=args.top_k)
-    if not Path(args.checkpoint).exists():
-        print(f"[!]  checkpoint {args.checkpoint} not found: A1/A2/A3 need a dense checkpoint.\n"
-              f"   Train one with: python3 train.py --config {args.config} --dataset wikitext2")
-    train_ids = load_wikitext2(args.seq_len, cfg.vocab_size, "train")
-    val_ids = load_wikitext2(args.seq_len, cfg.vocab_size, "validation")
-
-    report: Dict = {"config": args.config, "checkpoint": args.checkpoint, "top_k": args.top_k}
-    run = args.only
-    if run in (None, "a1"):
-        report["a1_recall"] = experiment_a1_recall(args, cfg, train_ids, val_ids, device)
-    if run in (None, "a2"):
-        report["a2_learned_vs_naive"] = experiment_a2_learned_vs_naive(args, cfg, train_ids, val_ids, device)
-    if run in (None, "a3"):
-        report["a3_topk_sweep"] = experiment_a3_topk_sweep(args, cfg, train_ids, val_ids, device)
-    if run in (None, "a4"):
-        report["a4_flops"] = experiment_a4_flops(args, cfg)
-
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2))
-    print(f"\nReport -> {out}")
-
-
-if __name__ == "__main__":
+def main(args=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", default="configs/deepseek_v3_2_nano.json")
     p.add_argument("--checkpoint", default="output/wikitext_comparison/dense/checkpoint-final/checkpoint.pt")
@@ -408,4 +375,37 @@ if __name__ == "__main__":
     p.add_argument("--sparse-lr", type=float, default=1e-4)
     p.add_argument("--only", choices=["a1", "a2", "a3", "a4"], default=None)
     p.add_argument("--output", default="output/ablations_report.json")
-    main(p.parse_args())
+
+    if args is None:
+        parsed = p.parse_args()
+    else:
+        parsed = p.parse_args(args)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+    cfg = load_cfg(parsed.config, dsa_top_k=parsed.top_k)
+    if not Path(parsed.checkpoint).exists():
+        print(f"[!]  checkpoint {parsed.checkpoint} not found: A1/A2/A3 need a dense checkpoint.\n"
+              f"   Train one with: python3 -m deepseek_v3_2.train --config {parsed.config} --dataset wikitext2")
+    train_ids = load_wikitext2(parsed.seq_len, cfg.vocab_size, "train")
+    val_ids = load_wikitext2(parsed.seq_len, cfg.vocab_size, "validation")
+
+    report: Dict = {"config": parsed.config, "checkpoint": parsed.checkpoint, "top_k": parsed.top_k}
+    run = parsed.only
+    if run in (None, "a1"):
+        report["a1_recall"] = experiment_a1_recall(parsed, cfg, train_ids, val_ids, device)
+    if run in (None, "a2"):
+        report["a2_learned_vs_naive"] = experiment_a2_learned_vs_naive(parsed, cfg, train_ids, val_ids, device)
+    if run in (None, "a3"):
+        report["a3_topk_sweep"] = experiment_a3_topk_sweep(parsed, cfg, train_ids, val_ids, device)
+    if run in (None, "a4"):
+        report["a4_flops"] = experiment_a4_flops(parsed, cfg)
+
+    out = Path(parsed.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2))
+    print(f"\nReport -> {out}")
+
+
+if __name__ == "__main__":
+    main()

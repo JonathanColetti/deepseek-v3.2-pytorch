@@ -34,12 +34,15 @@ Stage 2: Sparse training:
 from __future__ import annotations
 
 import argparse
+import copy
+import functools
 import json
 import logging
 import math
 import os
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -48,8 +51,33 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
-from deepseek_v3_2 import DeepSeekV32Config, DeepSeekV32ForCausalLM
-from deepseek_v3_2.model import DeepSeekV32DecoderLayer
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    MixedPrecision,
+    ShardingStrategy,
+)
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    apply_activation_checkpointing,
+    checkpoint_wrapper,
+)
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    StateDictOptions,
+)
+
+try:
+    from datasets import load_dataset
+except ImportError:
+    load_dataset = None
+
+try:
+    from transformers import AutoTokenizer
+except ImportError:
+    AutoTokenizer = None
+
+from . import DeepSeekV32Config, DeepSeekV32ForCausalLM
+from .model import DeepSeekV32DecoderLayer
 
 LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
@@ -144,11 +172,7 @@ def get_wikitext2_dataset(seq_len: int, vocab_size: int, split: str = "train") -
         ids = torch.load(cache, weights_only=True)
         return TokenDataset(ids, seq_len)
 
-    # kinda ugly but it is what it is
-    try:
-        from datasets import load_dataset
-        from transformers import AutoTokenizer
-    except ImportError:
+    if load_dataset is None or AutoTokenizer is None:
         log_main(
             "datasets not installed: falling back to synthetic data. "
             "Run `pip install datasets` to use WikiText-2.",
@@ -187,22 +211,6 @@ def wrap_model_distributed(model: nn.Module, device: torch.device) -> nn.Module:
     
 
     if torch.cuda.is_available():
-        # 4 FSDP shard per decoder layer, bf16 mixed precision
-
-        # only import if cuda is available ...
-        import functools
-        from torch.distributed.fsdp import (
-            FullyShardedDataParallel as FSDP,
-            MixedPrecision,
-            ShardingStrategy,
-        )
-        from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-
-        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-            apply_activation_checkpointing,
-            checkpoint_wrapper,
-        )
-
         mp = MixedPrecision(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.bfloat16,
@@ -526,11 +534,6 @@ def _infinite(loader: DataLoader, sampler):
 
 
 def _no_sync_ctx(model: nn.Module, is_last_micro: bool):
-    """Return a context manager that suppresses gradient sync for all but the last micro-step.
-
-    Works with FSDP, DDP, and plain modules.
-    """
-    from contextlib import nullcontext
     if is_last_micro:
         return nullcontext()
     if hasattr(model, "no_sync"):
@@ -566,16 +569,9 @@ def _save_checkpoint(
     ckpt_dir = out_dir / f"checkpoint-{tag}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # again not a big fan but
     try:
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         if isinstance(model, FSDP):
-            # All ranks must participate in this collective.
             try:
-                from torch.distributed.checkpoint.state_dict import (
-                    get_model_state_dict,
-                    StateDictOptions,
-                )
                 opts = StateDictOptions(full_state_dict=True, cpu_offload=True)
                 state = get_model_state_dict(model, options=opts)
             except Exception:
@@ -691,11 +687,8 @@ def main() -> None:
     setup_distributed()
     try:
         if getattr(args, "compare", False):
-            # ehhh
-            import copy, json as _json
-
             with open(args.config) as f:
-                base_dict = _json.load(f)
+                base_dict = json.load(f)
 
             results: Dict[str, Optional[float]] = {}
 
@@ -711,7 +704,7 @@ def main() -> None:
                 tmp_cfg = Path(args.output_dir) / f"_tmp_{label.split()[0].lower()}.json"
                 if is_main():
                     tmp_cfg.parent.mkdir(parents=True, exist_ok=True)
-                    tmp_cfg.write_text(_json.dumps(run_dict))
+                    tmp_cfg.write_text(json.dumps(run_dict))
                 if dist.is_initialized():
                     dist.barrier()
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # coding=utf-8
 """
-scripts/proof_dsa_from_pretrained.py
-=====================================
+Important mini proof: DSA from pre-trained dense
+=================================================
 The actual paper methodology in miniature:
 
   1. Load a pre-trained DENSE checkpoint (PPL already converged on WikiText-2)
@@ -16,34 +16,35 @@ only change is replacing dense attention with DSA.  If final val-PPL ~ dense
 val-PPL the implementation is correct.
 
 Usage:
-    python3 scripts/proof_dsa_from_pretrained.py \
+    python3 -m deepseek_v3_2.scripts.proof_dsa_from_pretrained \
         --checkpoint output/wikitext_comparison/dense/checkpoint-final/checkpoint.pt \
         --config     configs/deepseek_v3_2_nano.json \
         --warmup-steps 150 --sparse-steps 300
+
+    deepseek-proof-dsa \
+        --checkpoint output/wikitext_comparison/dense/checkpoint-final/checkpoint.pt \
+        --config     configs/deepseek_v3_2_nano.json
 """
 from __future__ import annotations
 
 import argparse
 import json
 import math
-import sys
 from pathlib import Path
 from typing import Dict
 
 import torch
 import torch.nn as nn
 
-# hacky but eh not planning to scale this
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from datasets import load_dataset
+from transformers import AutoTokenizer
 
-from deepseek_v3_2 import DeepSeekV32Config, DeepSeekV32ForCausalLM
+from .. import DeepSeekV32Config, DeepSeekV32ForCausalLM
 
 def load_wikitext2(seq_len: int, vocab_size: int, split: str = "train") -> torch.Tensor:
     cache = Path(f"/tmp/wikitext2_{split}_{seq_len}.pt")
     if cache.exists():
         return torch.load(cache, weights_only=True)
-    from datasets import load_dataset
-    from transformers import AutoTokenizer
     raw = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
     tok = AutoTokenizer.from_pretrained("gpt2")
     tok.model_max_length = 1_000_000
@@ -164,7 +165,6 @@ def run_stage(label: str, model: nn.Module, train_ids: torch.Tensor,
             ppl_str = f"ppl={math.exp(min(lm_val,20)):.1f}  " if not kl_only else ""
             print(f"    [{label}] step {step:4d}/{n_steps}  {ppl_str}kl={kl_val:.4f}  lr={scheduler.get_last_lr()[0]:.2e}")
 
-    # Evaluate on validation set
     # NOTE: a DSA model is always evaluated in SPARSE mode -
     # evaluating the warmed-up indexer in dense mode would be a tautology (dense attention
     # never invokes the indexer, so it trivially equals the dense baseline regardless of
@@ -186,140 +186,7 @@ def _cycle(ids, seq_len, batch):
             yield chunks[perm[i:i+batch]]
 
 
-def main(args: argparse.Namespace) -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}\n")
-
-    # Load config
-    with open(args.config) as f:
-        raw = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
-    cfg = DeepSeekV32Config(**raw)
-    cfg.dsa_kl_loss_weight = args.kl_weight
-
-    # Data
-    print("Loading WikiText-2 ...")
-    train_ids = load_wikitext2(args.seq_len, cfg.vocab_size, "train")
-    val_ids   = load_wikitext2(args.seq_len, cfg.vocab_size, "validation")
-    print(f"  train: {len(train_ids):,} tokens ({(len(train_ids)//args.seq_len):,} chunks)")
-    print(f"  val:   {len(val_ids):,} tokens ({(len(val_ids)//args.seq_len):,} chunks)\n")
-
-    # Step 0: baseline: evaluate the DENSE checkpoint as-is --------------
-    print("="*55)
-    print("Step 0: Dense checkpoint baseline (no DSA)")
-    print("="*55)
-    dense_cfg = DeepSeekV32Config(**{**raw, "use_dsa": False})
-    dense_model = DeepSeekV32ForCausalLM(dense_cfg).to(device)
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    dense_model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    dense_val_ppl = evaluate_ppl(dense_model, val_ids, args.seq_len, args.batch_size, device, dsa_mode="dense")
-    print(f"  Dense val PPL = {dense_val_ppl:.2f}   <- target to match")
-    # save mem
-    del dense_model
-
-    results = {"dense_val_ppl": dense_val_ppl}
-
-    # Step 1: transplant weights -> DSA model
-    print("\n" + "="*55)
-    print("Step 1: Load dense weights into DSA model")
-    print("="*55)
-    model = load_dense_into_dsa(args.checkpoint, cfg, device)
-
-    # eval DSA immediately after load (indexer is random -> sparse attn is bad)
-    before_warmup_ppl = evaluate_ppl(model, val_ids, args.seq_len, args.batch_size, device, dsa_mode="sparse")
-    print(f"  DSA val PPL (random indexer, before warmup) = {before_warmup_ppl:.2f}")
-    results["dsa_before_warmup_ppl"] = before_warmup_ppl
-
-    # warmup: train indexer only
-    if args.warmup_steps > 0:
-        print(f"\n{'='*55}")
-        print(f"Step 2: DSA warm-up ({args.warmup_steps} steps, indexer only)")
-        print(f"  Freeze main model; align indexer to dense attention via KL loss")
-        print("="*55)
-        n_trainable = freeze_except_indexer(model)
-        print(f"  Trainable: {n_trainable/1e3:.1f}K indexer params")
-        warmup_result = run_stage(
-            "warmup", model, train_ids, val_ids,
-            n_steps=args.warmup_steps, seq_len=args.seq_len, batch=args.batch_size,
-            lr=args.warmup_lr, device=device, dsa_mode="dense", kl_only=True,
-            log_interval=max(1, args.warmup_steps // 5),
-        )
-        print(f"\n  After warmup: val PPL (sparse mode) = {warmup_result['val_ppl']:.2f}")
-        results["after_warmup_ppl"] = warmup_result["val_ppl"]
-        results["warmup_kl"] = warmup_result["mean_kl"]
-
-    # Step 3: sparse finetuning: all params
-    print(f"\n{'='*55}")
-    print(f"Step 3: DSA sparse fine-tuning ({args.sparse_steps} steps, all params)")
-    print(f"  top-k = {cfg.dsa_top_k}  ({cfg.dsa_top_k}/{args.seq_len} = {cfg.dsa_top_k/args.seq_len*100:.0f}% of context)")
-    print("="*55)
-    n_trainable = unfreeze_all(model)
-    print(f"  Trainable: {n_trainable/1e6:.1f}M params")
-    sparse_result = run_stage(
-        "sparse", model, train_ids, val_ids,
-        n_steps=args.sparse_steps, seq_len=args.seq_len, batch=args.batch_size,
-        lr=args.sparse_lr, device=device, dsa_mode="sparse", kl_only=False,
-        log_interval=max(1, args.sparse_steps // 10),
-    )
-    results["after_sparse_ppl"] = sparse_result["val_ppl"]
-    results["sparse_kl"] = sparse_result["mean_kl"]
-
-    # compute-matched dense continuation
-    # The DSA model received `sparse_steps` extra gradient steps on top of the
-    # pretrained checkpoint. To attribute any PPL change to *sparsity* rather than to
-    # simply training longer, continue-train the DENSE model for the same number of
-    # steps at the same LR, and compare against THAT.
-    print(f"\n{'='*55}")
-    print(f"Step 4: Dense continuation ({args.sparse_steps} steps): fair baseline")
-    print("="*55)
-    dense_cont = DeepSeekV32ForCausalLM(dense_cfg).to(device)
-    dense_cont.load_state_dict(ckpt["model_state_dict"], strict=False)
-    unfreeze_all(dense_cont)
-    dense_cont_result = run_stage(
-        "dense-cont", dense_cont, train_ids, val_ids,
-        n_steps=args.sparse_steps, seq_len=args.seq_len, batch=args.batch_size,
-        lr=args.sparse_lr, device=device, dsa_mode="dense", kl_only=False,
-        log_interval=max(1, args.sparse_steps // 10),
-    )
-    # Dense model has no indexer -> eval in dense mode (override run_stage's sparse eval).
-    dense_cont_ppl = evaluate_ppl(dense_cont, val_ids, args.seq_len, args.batch_size, device, dsa_mode="dense")
-    results["dense_continuation_ppl"] = dense_cont_ppl
-    print(f"\n  Dense continuation: val PPL = {dense_cont_ppl:.2f}")
-    del dense_cont
-
-    # -- Final comparison ------------------------------------------------------
-    print(f"\n{'='*55}")
-    print(f"  VALIDATION PPL: WikiText-2")
-    print(f"{'='*55}")
-    print(f"  Dense baseline (pre-trained)           : {dense_val_ppl:.2f}")
-    if args.warmup_steps > 0:
-        print(f"  DSA (random indexer, no warmup)       : {before_warmup_ppl:.2f}")
-        print(f"  DSA (after warmup, sparse eval)       : {warmup_result['val_ppl']:.2f}")
-    print(f"  DSA (warmup + {args.sparse_steps} sparse steps)     : {sparse_result['val_ppl']:.2f}")
-    print(f"  Dense (+{args.sparse_steps} steps, fair baseline) : {dense_cont_ppl:.2f}")
-    print(f"{'-'*55}")
-    # The comparison is DSA-sparse vs the compute match dense continuation 
-    # both saw the same number of extra gradient steps. (Comparing to the pre-trained
-    # baseline instead would credit DSA for simply training longer.)
-    delta = sparse_result["val_ppl"] - dense_cont_ppl
-    pct   = delta / dense_cont_ppl * 100
-    print(f"  Delta DSA vs compute-matched dense         : {delta:+.2f} ({pct:+.2f}%)")
-    print(f"{'='*55}")
-    if pct < -2.0:
-        print(f"  [OK] At {cfg.dsa_top_k}/{args.seq_len} sparsity, DSA beats compute-matched dense by {-pct:.1f}%")
-    elif abs(pct) < 5.0:
-        print(f"  [OK] DSA preserves quality within {abs(pct):.1f}% of dense at equal compute")
-    else:
-        print(f"  [!]  Gap > 5%: try more sparse steps, larger top-k, or lower kl_weight")
-    results["delta_vs_compute_matched_dense_pct"] = pct
-
-    # Save
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(results, indent=2))
-    print(f"\n  Report -> {out}\n")
-
-
-if __name__ == "__main__":
+def main(args=None) -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", default="output/wikitext_comparison/dense/checkpoint-final/checkpoint.pt")
     p.add_argument("--config",     default="configs/deepseek_v3_2_nano.json")
@@ -331,4 +198,143 @@ if __name__ == "__main__":
     p.add_argument("--sparse-lr",  type=float, default=1e-4)
     p.add_argument("--kl-weight",  type=float, default=1.0)
     p.add_argument("--output",     default="output/proof_from_pretrained.json")
-    main(p.parse_args())
+
+    if args is None:
+        parsed = p.parse_args()
+    else:
+        parsed = p.parse_args(args)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}\n")
+
+    # Load config
+    with open(parsed.config) as f:
+        raw = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+    cfg = DeepSeekV32Config(**raw)
+    cfg.dsa_kl_loss_weight = parsed.kl_weight
+
+    # Data
+    print("Loading WikiText-2 ...")
+    train_ids = load_wikitext2(parsed.seq_len, cfg.vocab_size, "train")
+    val_ids   = load_wikitext2(parsed.seq_len, cfg.vocab_size, "validation")
+    print(f"  train: {len(train_ids):,} tokens ({(len(train_ids)//parsed.seq_len):,} chunks)")
+    print(f"  val:   {len(val_ids):,} tokens ({(len(val_ids)//parsed.seq_len):,} chunks)\n")
+
+    # Step 0: baseline: evaluate the DENSE checkpoint as-is --------------
+    print("="*55)
+    print("Step 0: Dense checkpoint baseline (no DSA)")
+    print("="*55)
+    dense_cfg = DeepSeekV32Config(**{**raw, "use_dsa": False})
+    dense_model = DeepSeekV32ForCausalLM(dense_cfg).to(device)
+    ckpt = torch.load(parsed.checkpoint, map_location=device, weights_only=False)
+    dense_model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    dense_val_ppl = evaluate_ppl(dense_model, val_ids, parsed.seq_len, parsed.batch_size, device, dsa_mode="dense")
+    print(f"  Dense val PPL = {dense_val_ppl:.2f}   <- target to match")
+    # save mem
+    del dense_model
+
+    results = {"dense_val_ppl": dense_val_ppl}
+
+    # Step 1: transplant weights -> DSA model
+    print("\n" + "="*55)
+    print("Step 1: Load dense weights into DSA model")
+    print("="*55)
+    model = load_dense_into_dsa(parsed.checkpoint, cfg, device)
+
+    # eval DSA immediately after load (indexer is random -> sparse attn is bad)
+    before_warmup_ppl = evaluate_ppl(model, val_ids, parsed.seq_len, parsed.batch_size, device, dsa_mode="sparse")
+    print(f"  DSA val PPL (random indexer, before warmup) = {before_warmup_ppl:.2f}")
+    results["dsa_before_warmup_ppl"] = before_warmup_ppl
+
+    # warmup: train indexer only
+    if parsed.warmup_steps > 0:
+        print(f"\n{'='*55}")
+        print(f"Step 2: DSA warm-up ({parsed.warmup_steps} steps, indexer only)")
+        print(f"  Freeze main model; align indexer to dense attention via KL loss")
+        print("="*55)
+        n_trainable = freeze_except_indexer(model)
+        print(f"  Trainable: {n_trainable/1e3:.1f}K indexer params")
+        warmup_result = run_stage(
+            "warmup", model, train_ids, val_ids,
+            n_steps=parsed.warmup_steps, seq_len=parsed.seq_len, batch=parsed.batch_size,
+            lr=parsed.warmup_lr, device=device, dsa_mode="dense", kl_only=True,
+            log_interval=max(1, parsed.warmup_steps // 5),
+        )
+        print(f"\n  After warmup: val PPL (sparse mode) = {warmup_result['val_ppl']:.2f}")
+        results["after_warmup_ppl"] = warmup_result["val_ppl"]
+        results["warmup_kl"] = warmup_result["mean_kl"]
+
+    # Step 3: sparse finetuning: all params
+    print(f"\n{'='*55}")
+    print(f"Step 3: DSA sparse fine-tuning ({parsed.sparse_steps} steps, all params)")
+    print(f"  top-k = {cfg.dsa_top_k}  ({cfg.dsa_top_k}/{parsed.seq_len} = {cfg.dsa_top_k/parsed.seq_len*100:.0f}% of context)")
+    print("="*55)
+    n_trainable = unfreeze_all(model)
+    print(f"  Trainable: {n_trainable/1e6:.1f}M params")
+    sparse_result = run_stage(
+        "sparse", model, train_ids, val_ids,
+        n_steps=parsed.sparse_steps, seq_len=parsed.seq_len, batch=parsed.batch_size,
+        lr=parsed.sparse_lr, device=device, dsa_mode="sparse", kl_only=False,
+        log_interval=max(1, parsed.sparse_steps // 10),
+    )
+    results["after_sparse_ppl"] = sparse_result["val_ppl"]
+    results["sparse_kl"] = sparse_result["mean_kl"]
+
+    # compute-matched dense continuation
+    # The DSA model received `sparse_steps` extra gradient steps on top of the
+    # pretrained checkpoint. To attribute any PPL change to *sparsity* rather than to
+    # simply training longer, continue-train the DENSE model for the same number of
+    # steps at the same LR, and compare against THAT.
+    print(f"\n{'='*55}")
+    print(f"Step 4: Dense continuation ({parsed.sparse_steps} steps): fair baseline")
+    print("="*55)
+    dense_cont = DeepSeekV32ForCausalLM(dense_cfg).to(device)
+    dense_cont.load_state_dict(ckpt["model_state_dict"], strict=False)
+    unfreeze_all(dense_cont)
+    dense_cont_result = run_stage(
+        "dense-cont", dense_cont, train_ids, val_ids,
+        n_steps=parsed.sparse_steps, seq_len=parsed.seq_len, batch=parsed.batch_size,
+        lr=parsed.sparse_lr, device=device, dsa_mode="dense", kl_only=False,
+        log_interval=max(1, parsed.sparse_steps // 10),
+    )
+    # Dense model has no indexer -> eval in dense mode (override run_stage's sparse eval).
+    dense_cont_ppl = evaluate_ppl(dense_cont, val_ids, parsed.seq_len, parsed.batch_size, device, dsa_mode="dense")
+    results["dense_continuation_ppl"] = dense_cont_ppl
+    print(f"\n  Dense continuation: val PPL = {dense_cont_ppl:.2f}")
+    del dense_cont
+
+    # -- Final comparison ------------------------------------------------------
+    print(f"\n{'='*55}")
+    print(f"  VALIDATION PPL: WikiText-2")
+    print(f"{'='*55}")
+    print(f"  Dense baseline (pre-trained)           : {dense_val_ppl:.2f}")
+    if parsed.warmup_steps > 0:
+        print(f"  DSA (random indexer, no warmup)       : {before_warmup_ppl:.2f}")
+        print(f"  DSA (after warmup, sparse eval)       : {warmup_result['val_ppl']:.2f}")
+    print(f"  DSA (warmup + {parsed.sparse_steps} sparse steps)     : {sparse_result['val_ppl']:.2f}")
+    print(f"  Dense (+{parsed.sparse_steps} steps, fair baseline) : {dense_cont_ppl:.2f}")
+    print(f"{'-'*55}")
+    # The comparison is DSA-sparse vs the compute match dense continuation
+    # both saw the same number of extra gradient steps. (Comparing to the pre-trained
+    # baseline instead would credit DSA for simply training longer.)
+    delta = sparse_result["val_ppl"] - dense_cont_ppl
+    pct   = delta / dense_cont_ppl * 100
+    print(f"  Delta DSA vs compute-matched dense         : {delta:+.2f} ({pct:+.2f}%)")
+    print(f"{'='*55}")
+    if pct < -2.0:
+        print(f"  [OK] At {cfg.dsa_top_k}/{parsed.seq_len} sparsity, DSA beats compute-matched dense by {-pct:.1f}%")
+    elif abs(pct) < 5.0:
+        print(f"  [OK] DSA preserves quality within {abs(pct):.1f}% of dense at equal compute")
+    else:
+        print(f"  [!]  Gap > 5%: try more sparse steps, larger top-k, or lower kl_weight")
+    results["delta_vs_compute_matched_dense_pct"] = pct
+
+    # Save
+    out = Path(parsed.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(results, indent=2))
+    print(f"\n  Report -> {out}\n")
+
+
+if __name__ == "__main__":
+    main()
